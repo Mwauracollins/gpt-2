@@ -25,21 +25,31 @@ class TextDataset(Dataset):
             max_length=self.max_length, return_tensors='pt'
         )
 
-        # Return the input ids and attention mask for each item in the dataset
         return encodings.input_ids.squeeze(), encodings.attention_mask.squeeze()
+
+
+def get_device(requested_device):
+    """Safely determine the available device."""
+    if requested_device == 'cuda' and torch.cuda.is_available():
+        return 'cuda'
+    elif requested_device == 'mps' and torch.backends.mps.is_available():
+        return 'mps'
+    return 'cpu'
 
 
 def train(model, tokenizer, train_dataset, batch_size, lr, epochs, device):
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    optimizer = AdamW(model.parameters(), lr=lr)
-    model.to(device)
-
-    print("Model Parameters:")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)  # Using PyTorch's AdamW
+    
+    # Safely move model to device
+    device = torch.device(device)
+    model = model.to(device)
+    
+    print(f"Training on device: {device}")
+    print("\nModel Parameters:")
     total_params = 0
-
-    # iterate through each parameter in the layers and print its size
     for name, param in model.named_parameters():
-        print(f"{name}: {param.size()}")  
+        print(f"{name}: {param.size()}")
         total_params += param.numel()
 
     print(f"\nTotal number of parameters: {total_params:,}")
@@ -48,27 +58,37 @@ def train(model, tokenizer, train_dataset, batch_size, lr, epochs, device):
         model.train()
         total_loss = 0
         for step, (input_ids, attention_mask) in enumerate(train_loader):
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
+            try:
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
 
-            optimizer.zero_grad()
-            outputs = model(input_ids=input_ids, target=input_ids)
-            loss = outputs.loss
-            total_loss += loss.item()
+                optimizer.zero_grad()
+                logits, loss = model(input_ids=input_ids, target=input_ids)
+                
+                if loss is None:
+                    continue
+                    
+                total_loss += loss.item()
+                loss.backward()
+                optimizer.step()
 
-            loss.backward()
-            optimizer.step()
+                if step % 100 == 0:
+                    print(f"Epoch [{epoch+1}/{epochs}], Step [{step}], Loss: {loss.item():.4f}")
 
-            if step % 100 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}], Step [{step}], Loss: {loss.item():.4f}")
+            except RuntimeError as e:
+                print(f"Error during training step: {e}")
+                continue
 
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{epochs}] - Average Loss: {avg_loss:.4f}")
         
         # Save checkpoint after each epoch
-        checkpoint_path = os.path.join(args.model_output_dir, f"checkpoint_epoch_{epoch+1}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
-        print(f"Model saved to {checkpoint_path}")
+        try:
+            checkpoint_path = os.path.join(args.model_output_dir, f"checkpoint_epoch_{epoch+1}.pth")
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"Model saved to {checkpoint_path}")
+        except Exception as e:
+            print(f"Error saving checkpoint: {e}")
 
 
 def main():
@@ -79,30 +99,42 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs to train")
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length for training")
-    parser.add_argument("--device", type=str, default='cuda', help="Device to train on ('cuda' or 'cpu')")
+    parser.add_argument("--device", type=str, default='cuda', help="Device to train on ('cuda', 'cpu', or 'mps')")
 
     args = parser.parse_args()
 
+    # Determine the available device
+    device = get_device(args.device)
+    print(f"Using device: {device}")
+
     # Load model and tokenizer
-    config = ModelConfig()
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    model = GPT2(config)
+    try:
+        config = ModelConfig()
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        model = GPT2(config)
+        
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    # set pad_token to eos_token
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # Load training data
+        with open(args.train_data, 'r', encoding='utf-8') as f:
+            train_texts = f.readlines()
 
-    # loading training data
-    with open(args.train_data, 'r') as f:
-        train_texts = f.readlines()
+        train_dataset = TextDataset(train_texts, tokenizer, max_length=args.max_length)
 
-    train_dataset = TextDataset(train_texts, tokenizer, max_length=args.max_length)
+        # Create output directory
+        if not os.path.exists(args.model_output_dir):
+            os.makedirs(args.model_output_dir)
 
-    # train the model
-    if not os.path.exists(args.model_output_dir):
-        os.makedirs(args.model_output_dir)
+        # Update device in args
+        args.device = device
+        
+        # Train the model
+        train(model, tokenizer, train_dataset, args.batch_size, args.learning_rate, args.epochs, device)
 
-    train(model, tokenizer, train_dataset, args.batch_size, args.learning_rate, args.epochs, args.device)
+    except Exception as e:
+        print(f"An error occurred during initialization: {e}")
+        raise
 
 
 if __name__ == "__main__":
