@@ -10,20 +10,26 @@ import argparse
 
 def generate_text(model, tokenizer, prompt, max_length, device):
     model.eval()
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    generated_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
 
     with torch.no_grad():
-        output = model.generate(
-            input_ids=inputs.input_ids,
-            attention_mask=inputs.attention_mask,
-            max_length=max_length,
-            do_sample=True,
-            temperature=0.7,
-            top_k=50,
-            top_p=0.95
-            )
+        for _ in range(max_length - input_ids.shape[1]):
+            logits, _ = model(generated_ids)
+            next_token_logits = logits[:, -1, :]
 
-    return tokenizer.decode(output[0], skip_special_tokens=True)
+            # Apply sampling or greedy strategy
+            next_token_id = torch.argmax(next_token_logits, dim=-1)  # For greedy decoding
+
+            # next_token_id = torch.multinomial(F.softmax(next_token_logits, dim=-1), num_samples=1)
+
+            # Concat the new token to the sequence
+            generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(-1)], dim=-1)
+
+            # Stop if the end-of-sequence token is generated
+            if next_token_id == tokenizer.eos_token_id:
+                break
+
+    return tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
 def main():
     parser = argparse.ArgumentParser(description="GPT-2 Inference Script")
